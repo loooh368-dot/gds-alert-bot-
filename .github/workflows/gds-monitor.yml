@@ -9,15 +9,21 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: gds-monitor
+  cancel-in-progress: false
+
 jobs:
   monitor:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -25,22 +31,26 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run GDS monitor
+      - name: Run GDS Monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
         run: python gds_monitor.py
 
       - name: Save monitoring data
         run: |
+
           git config user.name "github-actions[bot]"
+
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/
+          git add data/seen_results.json data/last_status.json
 
-          if git diff --cached --quiet; then
-            echo "No changes"
-          else
+          if ! git diff --cached --quiet; then
+
             git commit -m "Update GDS monitoring data"
+
             git push
+
           fi
