@@ -1,142 +1,60 @@
 import os
 import json
-import time
 import hashlib
 import logging
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
-from bs4 import BeautifulSoup
 
-# SETTINGS
+# ================= CONFIG =================
 
 BASE_URL = "https://www.indiapost.gov.in/gdsonlineengagement"
 
-CIRCLES = {
-    "West Bengal": "WestBengal",
-    "Assam": "Assam",
-    "North East": "NorthEast",
-}
+DATA_DIR = Path("data")
+STATE_FILE = DATA_DIR / "seen_results.json"
+STATUS_FILE = DATA_DIR / "last_status.json"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-DATA_DIR = Path("data")
-SEEN_FILE = DATA_DIR / "seen_urls.json"
-
-MAX_LIST = 10
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 GDSMonitor/2.0"
+CIRCLES = {
+    "West Bengal": "WestBengal",
+    "Assam": "Assam",
+    "North Eastern": "NorthEast",
 }
+
+MAX_LISTS = 10
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-log = logging.getLogger(__name__)
-
 session = requests.Session()
-session.headers.update(HEADERS)
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 IndiaPostGDSMonitor/2.0"
+})
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
-def load_seen():
-    DATA_DIR.mkdir(exist_ok=True)
-
-    if not SEEN_FILE.exists():
-        return {}
-
-    try:
-        data = json.loads(SEEN_FILE.read_text())
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_seen(data):
-    DATA_DIR.mkdir(exist_ok=True)
-
-    temp = SEEN_FILE.with_suffix(".tmp")
-    temp.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False)
-    )
-    temp.replace(SEEN_FILE)
-
-
-def get_result(circle, number):
-
-    url = (
-        f"{BASE_URL}/api/results/"
-        f"list{number}?circle={circle}"
-    )
-
-    try:
-        response = session.get(url, timeout=30)
-
-        if response.status_code != 200:
-            return None
-
-        soup = BeautifulSoup(
-            response.text, "html.parser"
-        )
-
-        table = soup.find("table")
-
-        if not table:
-            return None
-
-        rows = table.find_all("tr")
-
-        if len(rows) < 2:
-            return None
-
-        headers = " ".join(
-            th.get_text(" ", strip=True).lower()
-            for th in table.find_all("th")
-        )
-
-        if "reg number" not in headers:
-            return None
-
-        content = " ".join(
-            table.get_text(" ", strip=True).split()
-        )
-
-        if len(content) < 50:
-            return None
-
-        fingerprint = hashlib.sha256(
-            content.encode("utf-8")
-        ).hexdigest()
-
-        return {
-            "url": url,
-            "hash": fingerprint,
-            "list": number
-        }
-
-    except requests.RequestException as error:
-        log.error("%s List-%s: %s", circle, number, error)
-        return None
-
+# ================= TELEGRAM =================
 
 def send_telegram(message):
 
     if not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError("Telegram secrets missing")
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-    response = requests.post(
+    response = session.post(
         url,
         json={
             "chat_id": CHAT_ID,
             "text": message,
-            "disable_web_page_preview": False
+            "disable_web_page_preview": True
         },
         timeout=30
     )
@@ -146,95 +64,219 @@ def send_telegram(message):
     result = response.json()
 
     if not result.get("ok"):
-        raise RuntimeError(str(result))
+        raise RuntimeError("Telegram message failed")
+
+    logging.info("Telegram message sent successfully")
 
 
-def main():
+# ================= STATE =================
 
-    log.info("India Post GDS Monitor started")
+def load_json(path, default):
 
-    seen = load_seen()
+    if not path.exists():
+        return default
 
-    # First run: save existing lists as baseline.
-    if not seen:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
 
-        log.info("Creating initial baseline")
+    except Exception:
+        return default
 
-        for circle_name, circle_code in CIRCLES.items():
 
-            for number in range(1, MAX_LIST + 1):
+def save_json(path, data):
 
-                item = get_result(circle_code, number)
+    DATA_DIR.mkdir(exist_ok=True)
 
-                if item:
-                    key = f"{circle_code}_List-{number}"
-                    seen[key] = item["hash"]
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
 
-                    log.info(
-                        "Baseline: %s List-%s",
-                        circle_name, number
-                    )
 
-        save_seen(seen)
+# ================= OFFICIAL RESULT CHECK =================
 
-        log.info("Initial baseline saved. No alerts sent.")
-        return
+def check_results():
 
-    changes = {}
-
-    # Check all three circles.
+    results = {}
 
     for circle_name, circle_code in CIRCLES.items():
 
-        for number in range(1, MAX_LIST + 1):
+        for number in range(1, MAX_LISTS + 1):
 
-            item = get_result(circle_code, number)
+            url = (
+                f"{BASE_URL}/api/results/"
+                f"list{number}?circle={circle_code}"
+            )
 
-            if not item:
+            logging.info(
+                "Checking %s List-%s",
+                circle_name,
+                number
+            )
+
+            response = session.get(
+                url,
+                timeout=40
+            )
+
+            if response.status_code == 404:
                 continue
+
+            response.raise_for_status()
+
+            content = response.content
+
+            # Only accept actual PDF files.
+            if not content.startswith(b"%PDF"):
+                continue
+
+            fingerprint = hashlib.sha256(
+                content
+            ).hexdigest()
 
             key = f"{circle_code}_List-{number}"
 
-            old_hash = seen.get(key)
+            results[key] = {
+                "circle": circle_name,
+                "list": f"List-{number}",
+                "url": url,
+                "hash": fingerprint
+            }
 
-            if old_hash != item["hash"]:
+    return results
 
-                changes[key] = {
-                    "circle": circle_name,
-                    "list": number,
-                    "url": item["url"],
-                    "hash": item["hash"]
-                }
 
-    if not changes:
-        log.info("No new or changed GDS list detected.")
-        return
+# ================= ALERT =================
 
-    # Send notifications.
+def build_alert(item):
 
-    for key, item in changes.items():
+    return (
+        "🚨 INDIA POST GDS NEW MERIT LIST\n\n"
+        f"📍 Circle: {item['circle']}\n"
+        f"📌 List: {item['list']}\n"
+        "📅 Official publication: Newly detected\n\n"
+        "🔗 Official PDF:\n"
+        f"{item['url']}\n\n"
+        "Source: India Post Official Website"
+    )
 
-        message = (
-            "🚨 INDIA POST GDS ALERT\n\n"
-            "🆕 New/Updated Merit List Detected!\n\n"
-            f"📍 Circle: {item['circle']}\n"
-            f"📌 List: List-{item['list']}\n\n"
-            f"🔗 Official Result Link:\n{item['url']}"
+
+# ================= MAIN =================
+
+def main():
+
+    logging.info("India Post GDS Monitor started")
+
+    current_time = datetime.now(IST)
+
+    today = current_time.strftime("%Y-%m-%d")
+
+    old_results = load_json(STATE_FILE, None)
+
+    last_status = load_json(
+        STATUS_FILE,
+        {}
+    )
+
+    current_results = check_results()
+
+    # First run: create baseline.
+    if old_results is None:
+
+        save_json(
+            STATE_FILE,
+            current_results
         )
 
-        try:
-            send_telegram(message)
+        logging.info("Initial baseline created")
 
-            seen[key] = item["hash"]
-            save_seen(seen)
+        return
 
-            log.info("Telegram notification sent: %s", key)
+    # Detect new or changed PDFs.
+    new_items = []
 
-        except Exception as error:
-            log.error("Notification failed: %s", error)
+    for key, item in current_results.items():
 
-    log.info("Monitoring cycle completed.")
+        old_item = old_results.get(key)
+
+        if old_item is None:
+
+            new_items.append(item)
+
+        elif old_item.get("hash") != item["hash"]:
+
+            new_items.append(item)
+
+    # New list found.
+    if new_items:
+
+        for item in new_items:
+
+            send_telegram(
+                build_alert(item)
+            )
+
+        save_json(
+            STATE_FILE,
+            current_results
+        )
+
+        save_json(
+            STATUS_FILE,
+            {"date": today}
+        )
+
+        logging.info(
+            "%s new or updated list(s) detected",
+            len(new_items)
+        )
+
+        return
+
+    # No new list: send only once per day.
+    if last_status.get("date") != today:
+
+        message = (
+            "ℹ️ INDIA POST GDS DAILY UPDATE\n\n"
+            "Aaj porjonto notun kono Merit List "
+            "detect hoyni.\n\n"
+            "West Bengal: No New List\n"
+            "Assam: No New List\n"
+            "North Eastern: No New List\n\n"
+            f"Last Checked: "
+            f"{current_time.strftime('%d-%m-%Y %I:%M %p')}\n\n"
+            "Official Website:\n"
+            f"{BASE_URL}"
+        )
+
+        send_telegram(message)
+
+        save_json(
+            STATUS_FILE,
+            {"date": today}
+        )
+
+        logging.info("Daily no-update message sent")
+
+    else:
+
+        logging.info(
+            "No new list. Daily message already sent."
+        )
+
+    save_json(
+        STATE_FILE,
+        current_results
+    )
 
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        main()
+
+    except Exception:
+
+        logging.exception("Monitoring failed")
+
+        raise
