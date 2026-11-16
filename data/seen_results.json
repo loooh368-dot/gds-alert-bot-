@@ -1,0 +1,20 @@
+{
+  "WestBengal_List-1": {
+    "circle": "West Bengal",
+    "list": "List-1",
+    "url": "https://www.indiapost.gov.in/gdsonlineengagement/api/results/list1?circle=WestBengal",
+    "hash": "d0b5f4da90c4a6ecb456235161d3ed9a977251e14eeff82f46cb9f10c9e2e18e"
+  },
+  "Assam_List-1": {
+    "circle": "Assam",
+    "list": "List-1",
+    "url": "https://www.indiapost.gov.in/gdsonlineengagement/api/results/list1?circle=Assam",
+    "hash": "b537dfba964e766ba0d878a56eefc8ba7fda27c44404263fd831270c721e8ded"
+  },
+  "NorthEast_List-1": {
+    "circle": "North Eastern",
+    "list": "List-1",
+    "url": "https://www.indiapost.gov.in/gdsonlineengagement/api/results/list1?circle=NorthEast",
+    "hash": "08184b14315f88b0bfc7cf244fcdd69827dfa5c60ca4ad2159f494dabd062b78"
+  }
+}
